@@ -1,11 +1,12 @@
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 import requests
 import time
 import os
 import json
 import logging
 import re
+import hmac
 import xml.etree.ElementTree as ET
 from html import unescape
 from datetime import datetime
@@ -158,6 +159,9 @@ DEEPSEEK_MODEL = os.environ.get(
     "deepseek-flash"
 )
 
+APP_USERNAME = os.environ.get("APP_USERNAME", "")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
 OPENALEX_API_URL = "https://api.openalex.org/works"
 
 PUBMED_ESEARCH_URL = (
@@ -167,6 +171,32 @@ PUBMED_ESEARCH_URL = (
 PUBMED_EFETCH_URL = (
     "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 )
+
+
+@app.before_request
+def require_access_password():
+    """配置账号密码后启用 Basic Auth，/health 保持公开。"""
+    if (
+        not APP_USERNAME
+        or not APP_PASSWORD
+        or request.path == "/health"
+    ):
+        return None
+
+    auth = request.authorization
+
+    if (
+        auth
+        and hmac.compare_digest(auth.username or "", APP_USERNAME)
+        and hmac.compare_digest(auth.password or "", APP_PASSWORD)
+    ):
+        return None
+
+    return Response(
+        "需要访问密码",
+        401,
+        {"WWW-Authenticate": 'Basic realm="PaperToday"'}
+    )
 
 
 # ==========================================

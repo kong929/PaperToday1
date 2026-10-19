@@ -37,6 +37,24 @@ python app.py
 
 - `DEEPSEEK_API_KEY`：DeepSeek API 密钥。
 - `DEEPSEEK_MODEL`：模型名称，默认 `deepseek-flash`。
+- `APP_USERNAME`、`APP_PASSWORD`：可选访问密码，两者都设置后启用 Basic Auth。
+
+## 公网部署
+
+项目包含 `render.yaml` 和 `Procfile`，可以直接部署到 Render：
+
+1. 把项目推送到 GitHub，确保仓库根目录直接包含 `app.py`、`requirements.txt`、`render.yaml` 和 `templates/`。
+2. 在 Render 中选择 **New > Blueprint**，连接该 GitHub 仓库。
+3. 按提示填写 `DEEPSEEK_API_KEY`，创建服务。
+4. 部署完成后访问 Render 提供的 `https://...onrender.com` 地址。
+
+如果手动创建 Web Service：
+
+- Build Command：`pip install -r requirements.txt`
+- Start Command：`gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1`
+- Health Check Path：`/health`
+
+Render 免费实例空闲后会休眠，首次访问需要等待冷启动；论文数据首次抓取也可能需要几十秒。
 
 ## 数据来源
 
