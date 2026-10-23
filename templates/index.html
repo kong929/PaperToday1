@@ -13,27 +13,48 @@
   <div class="controls"><button id="toggle" type="button">暂停滚动</button><button id="next" type="button">下一篇</button></div>
   <script>
     "use strict";
-    // 每篇论文完整播放周期为 2 小时；需要调整时只改这个数值。
     const ARTICLE_DURATION_MS=6*60*1000;
-    let papers=[],paperIndex=0,playing=true,animationId=null,cycleStartedAt=0,elapsedBeforeStart=0,loadToken=0,enrichController=null;
+    const ENGLISH_DURATION_MS=90*1000;
+    let papers=[],paperIndex=0,playing=true,animationId=null,phaseStartedAt=0,elapsedBeforeStart=0,phase="english",chineseStartScroll=0,loadToken=0,enrichController=null,aiState="pending",aiResult=null;
     const paperElement=document.getElementById("paper"),statusElement=document.getElementById("cycle-status"),progressBar=document.getElementById("progress-bar"),toggleButton=document.getElementById("toggle");
     function escapeHTML(value){const node=document.createElement("div");node.textContent=String(value??"");return node.innerHTML}
     function safeURL(value){try{const url=new URL(value);return["http:","https:"].includes(url.protocol)?url.href:""}catch{return""}}
     function paragraphs(value){return escapeHTML(value||"暂无内容").replace(/\n{2,}/g,"</p><p>")}
     async function loadPapers(){try{const response=await fetch("/api/papers?journal=all");if(!response.ok)throw new Error("论文数据获取失败");const data=await response.json();papers=Array.isArray(data.papers)?data.papers:[];if(!papers.length)throw new Error("暂时没有可展示的论文");await showPaper(0)}catch(error){paperElement.innerHTML=`<div class="loading">${escapeHTML(error.message)}，请稍后刷新。</div>`;statusElement.textContent="载入失败"}}
-    function renderPaper(paper,enriched,state){
-      const link=safeURL(paper.url),summary=(enriched.summary_zh||"").trim(),abstractZh=(enriched.abstract_zh||"").trim(),sourceAbstract=(paper.abstract||"").trim();
-      const summarySection=summary?`<section><h2>论文导读与总结</h2><p>${paragraphs(summary)}</p></section>`:"";
-      const abstractZhSection=abstractZh?`<section><h2>中文摘要</h2><p>${paragraphs(abstractZh)}</p></section>`:"";
+    function renderPaper(paper){
+      const link=safeURL(paper.url),sourceAbstract=(paper.abstract||"").trim();
       const sourceSection=sourceAbstract?`<section><h2>英文摘要原文</h2><p class="source">${paragraphs(sourceAbstract)}</p></section>`:`<section><h2>论文摘要</h2><div class="notice">公开元数据中暂未提供这篇论文的摘要，可通过下方链接访问原文。</div></section>`;
-      const aiNotice=state==="loading"?`<div class="notice">正在生成中文翻译与总结…</div>`:state==="unavailable"?`<div class="notice">AI 翻译与总结暂时不可用，以下保留论文原始信息与英文摘要。</div>`:"";
-      const originalTitle=enriched.title_zh&&enriched.title_zh!==paper.title?`<div class="original-title">${escapeHTML(paper.title)}</div>`:"";
-      paperElement.innerHTML=`<div class="eyebrow">${escapeHTML(paper.journal)} · ${escapeHTML(paper.date)}</div><h1>${escapeHTML(enriched.title_zh||paper.title)}</h1>${originalTitle}<div class="meta">作者：${escapeHTML(paper.authors)}</div>${summarySection}${abstractZhSection}${sourceSection}${aiNotice}<div class="notice">翻译与总结由 AI 根据公开论文元数据生成，仅供阅读参考，请以论文原文为准。</div>${link?`<a class="paper-link" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">访问论文原文 →</a>`:""}`;
+      paperElement.innerHTML=`<div class="eyebrow">${escapeHTML(paper.journal)} · ${escapeHTML(paper.date)}</div><h1>${escapeHTML(paper.title)}</h1><div class="meta">作者：${escapeHTML(paper.authors)}</div>${sourceSection}<div id="ai-content"></div>${link?`<a class="paper-link" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">访问论文原文 →</a>`:""}`;
+    }
+    function revealEnrichment(){
+      const content=document.getElementById("ai-content");
+      if(!content)return;
+      if(aiState==="ready"){
+        content.innerHTML=`<section><h2>中文标题</h2><p>${paragraphs(aiResult.title_zh)}</p></section><section><h2>中文摘要</h2><p>${paragraphs(aiResult.abstract_zh)}</p></section><section><h2>论文导读与总结</h2><p>${paragraphs(aiResult.summary_zh)}</p></section><div class="notice">翻译与总结由 AI 根据公开论文元数据生成，仅供阅读参考，请以论文原文为准。</div>`;
+      }else{
+        content.innerHTML='<div class="notice">AI 翻译与总结暂时不可用，以下保留论文原始信息与英文摘要。</div>';
+      }
+    }
+    function beginChinese(){
+      if(phase!=="english"&&phase!=="waiting")return;
+      if(aiState==="pending"){
+        phase="waiting";
+        statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 正在生成中文翻译与总结…`;
+        return;
+      }
+      phase="chinese";
+      chineseStartScroll=window.scrollY;
+      revealEnrichment();
+      window.scrollTo(0,chineseStartScroll);
+      elapsedBeforeStart=0;
+      phaseStartedAt=performance.now();
+      if(playing)tick(phaseStartedAt);
     }
     async function showPaper(index){
       cancelAnimationFrame(animationId);if(enrichController)enrichController.abort();
       const token=++loadToken;paperIndex=((index%papers.length)+papers.length)%papers.length;const paper=papers[paperIndex];
-      window.scrollTo(0,0);progressBar.style.width="0";renderPaper(paper,{},"loading");startCycle();
+      aiState="pending";aiResult=null;
+      window.scrollTo(0,0);progressBar.style.width="0";renderPaper(paper);startCycle();
       const controller=new AbortController();enrichController=controller;
       const timer=setTimeout(()=>controller.abort(),105000);
       try{
@@ -50,16 +71,52 @@
           if(!result.ok)throw new Error("AI 内容暂不可用");
           enriched=await result.json();
         }
-        if(token===loadToken)renderPaper(paper,enriched,"ready");
+        if(token===loadToken){
+          aiState="ready";aiResult=enriched;
+          if(phase==="waiting")beginChinese();
+        }
       }catch{
-        if(token===loadToken)renderPaper(paper,{},"unavailable");
+        if(token===loadToken){
+          aiState="unavailable";
+          if(phase==="waiting")beginChinese();
+        }
       }finally{
         clearTimeout(timer);if(token===loadToken)enrichController=null;
       }
     }
-    function startCycle(){elapsedBeforeStart=0;cycleStartedAt=performance.now();playing=true;toggleButton.textContent="暂停滚动";tick(cycleStartedAt)}
-    function tick(now){if(!playing)return;const elapsed=elapsedBeforeStart+now-cycleStartedAt,ratio=Math.min(elapsed/ARTICLE_DURATION_MS,1),maxScroll=Math.max(document.documentElement.scrollHeight-innerHeight,0);window.scrollTo(0,maxScroll*ratio);progressBar.style.width=`${ratio*100}%`;const remainingMinutes=Math.max(0,Math.ceil((ARTICLE_DURATION_MS-elapsed)/60000));statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 约 ${remainingMinutes} 分钟后切换`;if(ratio>=1)showPaper(paperIndex+1);else animationId=requestAnimationFrame(tick)}
-    toggleButton.addEventListener("click",()=>{if(playing){elapsedBeforeStart+=performance.now()-cycleStartedAt;playing=false;cancelAnimationFrame(animationId);toggleButton.textContent="继续滚动";statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 已暂停`}else{playing=true;cycleStartedAt=performance.now();toggleButton.textContent="暂停滚动";animationId=requestAnimationFrame(tick)}});
+    function startCycle(){
+      phase="english";elapsedBeforeStart=0;phaseStartedAt=performance.now();playing=true;
+      toggleButton.textContent="暂停滚动";tick(phaseStartedAt);
+    }
+    function tick(now){
+      if(!playing)return;
+      if(phase==="waiting"){
+        statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 正在生成中文翻译与总结…`;
+        return;
+      }
+      const elapsed=elapsedBeforeStart+now-phaseStartedAt;
+      const duration=phase==="english"?ENGLISH_DURATION_MS:ARTICLE_DURATION_MS-ENGLISH_DURATION_MS;
+      const ratio=Math.min(elapsed/duration,1);
+      const maxScroll=Math.max(document.documentElement.scrollHeight-innerHeight,0);
+      const scroll=phase==="english"?maxScroll*ratio:chineseStartScroll+(maxScroll-chineseStartScroll)*ratio;
+      window.scrollTo(0,scroll);
+      const overall=phase==="english"?elapsed:ENGLISH_DURATION_MS+elapsed;
+      progressBar.style.width=`${Math.min(overall/ARTICLE_DURATION_MS,1)*100}%`;
+      statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 约 ${Math.max(0,Math.ceil((ARTICLE_DURATION_MS-overall)/60000))} 分钟后切换`;
+      if(ratio>=1){
+        if(phase==="english")beginChinese();
+        else showPaper(paperIndex+1);
+      }else animationId=requestAnimationFrame(tick);
+    }
+    toggleButton.addEventListener("click",()=>{
+      if(playing){
+        if(phase!=="waiting")elapsedBeforeStart+=performance.now()-phaseStartedAt;
+        playing=false;cancelAnimationFrame(animationId);toggleButton.textContent="继续滚动";
+        statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 已暂停`;
+      }else{
+        playing=true;phaseStartedAt=performance.now();toggleButton.textContent="暂停滚动";tick(phaseStartedAt);
+      }
+    });
     document.getElementById("next").addEventListener("click",()=>showPaper(paperIndex+1));loadPapers();
   </script>
 </body>
