@@ -7,10 +7,12 @@ import json
 import logging
 import re
 import hmac
+import uuid
 import xml.etree.ElementTree as ET
 from html import unescape
 from datetime import datetime
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
 # 1. Flask 初始化
@@ -137,6 +139,9 @@ TRANSLATION_CACHE = {}
 
 # 单篇论文的翻译与总结缓存
 ENRICHMENT_CACHE = {}
+ENRICHMENT_JOBS = {}
+ENRICHMENT_BY_PAPER = {}
+ENRICHMENT_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 # 线程锁
 cache_lock = Lock()
@@ -816,34 +821,27 @@ def get_papers():
     all_papers = []
     errors = []
 
-    for key in keys:
-
-        try:
-            papers = fetch_journal_papers(key)
-
-            all_papers.extend(papers)
-
-        except (
-            requests.RequestException,
-            ValueError,
-            KeyError,
-            TypeError
-        ) as error:
-
-            app.logger.warning(
-                "获取 %s 论文失败: %s",
-                key,
-                error
-            )
-
-            errors.append(key)
-
-            # 数据源故障时尝试读取旧缓存
-            with cache_lock:
-                cached = PAPER_CACHE.get(key)
-
-            if cached:
-                all_papers.extend(cached[1])
+    with ThreadPoolExecutor(max_workers=len(keys)) as executor:
+        futures = {
+            executor.submit(fetch_journal_papers, key): key
+            for key in keys
+        }
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                all_papers.extend(future.result())
+            except (
+                requests.RequestException,
+                ValueError,
+                KeyError,
+                TypeError
+            ) as error:
+                app.logger.warning("获取 %s 论文失败: %s", key, error)
+                with cache_lock:
+                    cached = PAPER_CACHE.get(key)
+                if cached:
+                    all_papers.extend(cached[1])
+                errors.append(key)
 
     # 按发表日期排序
     all_papers.sort(
@@ -985,9 +983,18 @@ summary_zh：直接面向读者写 3 至 5 段中文导读，依次说明研究�
         "abstract_zh": clean_ai_text(translation["abstract_zh"]),
         "summary_zh": clean_ai_text(summary["summary_zh"])
     }
+
+
+def generate_enrichment(paper, cache_key):
+    enriched = call_deepseek_enrich(paper)
+    with cache_lock:
+        ENRICHMENT_CACHE[cache_key] = enriched
+    return enriched
+
+
 @app.route("/api/enrich", methods=["POST"])
 def enrich_paper():
-    """处理当前展示的单篇论文，避免一次翻译整批论文。"""
+    """异步处理单篇论文，避免模型耗时占住网关连接。"""
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"error": "请求必须是 JSON 对象"}), 400
@@ -1005,23 +1012,57 @@ def enrich_paper():
     paper["abstract"] = paper["abstract"][:12000]
     cache_key = paper["title"] + "\n" + paper["abstract"]
 
-    with cache_lock:
-        cached = ENRICHMENT_CACHE.get(cache_key)
-    if cached:
-        return jsonify(cached)
     if not AI_API_KEY:
         return jsonify({"error": "AI API 尚未配置"}), 503
 
+    now = time.time()
+    with cache_lock:
+        cached = ENRICHMENT_CACHE.get(cache_key)
+        if cached:
+            return jsonify(cached)
+
+        for job_id, (created, paper_key, future) in list(ENRICHMENT_JOBS.items()):
+            if future.done() and now - created > CACHE_SECONDS:
+                del ENRICHMENT_JOBS[job_id]
+                if ENRICHMENT_BY_PAPER.get(paper_key) == job_id:
+                    del ENRICHMENT_BY_PAPER[paper_key]
+
+        job_id = ENRICHMENT_BY_PAPER.get(cache_key)
+        if job_id:
+            future = ENRICHMENT_JOBS[job_id][2]
+            if future.done() and future.exception():
+                del ENRICHMENT_JOBS[job_id]
+                del ENRICHMENT_BY_PAPER[cache_key]
+                job_id = None
+
+        if not job_id:
+            active = sum(not future.done() for _, _, future in ENRICHMENT_JOBS.values())
+            if active >= 8:
+                return jsonify({"error": "翻译任务繁忙，请稍后重试"}), 503
+            job_id = uuid.uuid4().hex
+            future = ENRICHMENT_EXECUTOR.submit(generate_enrichment, paper, cache_key)
+            ENRICHMENT_JOBS[job_id] = (now, cache_key, future)
+            ENRICHMENT_BY_PAPER[cache_key] = job_id
+
+    return jsonify({"status": "pending", "job_id": job_id}), 202
+
+
+@app.route("/api/enrich/<job_id>", methods=["GET"])
+def enrichment_status(job_id):
+    with cache_lock:
+        job = ENRICHMENT_JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "翻译任务不存在或已过期"}), 404
+    future = job[2]
+    if not future.done():
+        return jsonify({"status": "pending"}), 202
+
     try:
-        enriched = call_deepseek_enrich(paper)
+        return jsonify(future.result())
     except (requests.RequestException, ValueError, KeyError, TypeError,
             RuntimeError, json.JSONDecodeError) as error:
         app.logger.warning("论文翻译与总结失败: %s", error)
         return jsonify({"error": "翻译与总结服务暂时不可用"}), 502
-
-    with cache_lock:
-        ENRICHMENT_CACHE[cache_key] = enriched
-    return jsonify(enriched)
 
 
 # ==========================================

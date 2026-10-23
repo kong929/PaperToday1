@@ -15,23 +15,47 @@
     "use strict";
     // 每篇论文完整播放周期为 2 小时；需要调整时只改这个数值。
     const ARTICLE_DURATION_MS=6*60*1000;
-    let papers=[],paperIndex=0,playing=true,animationId=null,cycleStartedAt=0,elapsedBeforeStart=0;
+    let papers=[],paperIndex=0,playing=true,animationId=null,cycleStartedAt=0,elapsedBeforeStart=0,loadToken=0,enrichController=null;
     const paperElement=document.getElementById("paper"),statusElement=document.getElementById("cycle-status"),progressBar=document.getElementById("progress-bar"),toggleButton=document.getElementById("toggle");
     function escapeHTML(value){const node=document.createElement("div");node.textContent=String(value??"");return node.innerHTML}
     function safeURL(value){try{const url=new URL(value);return["http:","https:"].includes(url.protocol)?url.href:""}catch{return""}}
     function paragraphs(value){return escapeHTML(value||"暂无内容").replace(/\n{2,}/g,"</p><p>")}
     async function loadPapers(){try{const response=await fetch("/api/papers?journal=all");if(!response.ok)throw new Error("论文数据获取失败");const data=await response.json();papers=Array.isArray(data.papers)?data.papers:[];if(!papers.length)throw new Error("暂时没有可展示的论文");await showPaper(0)}catch(error){paperElement.innerHTML=`<div class="loading">${escapeHTML(error.message)}，请稍后刷新。</div>`;statusElement.textContent="载入失败"}}
-    async function showPaper(index){
-      cancelAnimationFrame(animationId);paperIndex=((index%papers.length)+papers.length)%papers.length;const paper=papers[paperIndex];window.scrollTo(0,0);progressBar.style.width="0";statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 正在生成翻译与总结…`;paperElement.innerHTML='<div class="loading">正在准备这篇论文的翻译与总结…</div>';
-      let enriched,aiUnavailable=false;
-      try{const response=await fetch("/api/enrich",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(paper)});if(!response.ok)throw new Error("AI 内容暂不可用");enriched=await response.json()}
-      catch{aiUnavailable=true;enriched={title_zh:paper.title,abstract_zh:"",summary_zh:""}}
+    function renderPaper(paper,enriched,state){
       const link=safeURL(paper.url),summary=(enriched.summary_zh||"").trim(),abstractZh=(enriched.abstract_zh||"").trim(),sourceAbstract=(paper.abstract||"").trim();
       const summarySection=summary?`<section><h2>论文导读与总结</h2><p>${paragraphs(summary)}</p></section>`:"";
       const abstractZhSection=abstractZh?`<section><h2>中文摘要</h2><p>${paragraphs(abstractZh)}</p></section>`:"";
       const sourceSection=sourceAbstract?`<section><h2>英文摘要原文</h2><p class="source">${paragraphs(sourceAbstract)}</p></section>`:`<section><h2>论文摘要</h2><div class="notice">公开元数据中暂未提供这篇论文的摘要，可通过下方链接访问原文。</div></section>`;
-      const aiNotice=aiUnavailable?`<div class="notice">AI 翻译与总结暂时不可用，以下保留论文原始信息与英文摘要。</div>`:"";
-      paperElement.innerHTML=`<div class="eyebrow">${escapeHTML(paper.journal)} · ${escapeHTML(paper.date)}</div><h1>${escapeHTML(enriched.title_zh)}</h1><div class="original-title">${escapeHTML(paper.title)}</div><div class="meta">作者：${escapeHTML(paper.authors)}</div>${summarySection}${abstractZhSection}${sourceSection}${aiNotice}<div class="notice">翻译与总结由 AI 根据公开论文元数据生成，仅供阅读参考，请以论文原文为准。</div>${link?`<a class="paper-link" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">访问论文原文 →</a>`:""}`;startCycle()
+      const aiNotice=state==="loading"?`<div class="notice">正在生成中文翻译与总结…</div>`:state==="unavailable"?`<div class="notice">AI 翻译与总结暂时不可用，以下保留论文原始信息与英文摘要。</div>`:"";
+      const originalTitle=enriched.title_zh&&enriched.title_zh!==paper.title?`<div class="original-title">${escapeHTML(paper.title)}</div>`:"";
+      paperElement.innerHTML=`<div class="eyebrow">${escapeHTML(paper.journal)} · ${escapeHTML(paper.date)}</div><h1>${escapeHTML(enriched.title_zh||paper.title)}</h1>${originalTitle}<div class="meta">作者：${escapeHTML(paper.authors)}</div>${summarySection}${abstractZhSection}${sourceSection}${aiNotice}<div class="notice">翻译与总结由 AI 根据公开论文元数据生成，仅供阅读参考，请以论文原文为准。</div>${link?`<a class="paper-link" href="${escapeHTML(link)}" target="_blank" rel="noopener noreferrer">访问论文原文 →</a>`:""}`;
+    }
+    async function showPaper(index){
+      cancelAnimationFrame(animationId);if(enrichController)enrichController.abort();
+      const token=++loadToken;paperIndex=((index%papers.length)+papers.length)%papers.length;const paper=papers[paperIndex];
+      window.scrollTo(0,0);progressBar.style.width="0";renderPaper(paper,{},"loading");startCycle();
+      const controller=new AbortController();enrichController=controller;
+      const timer=setTimeout(()=>controller.abort(),105000);
+      try{
+        const response=await fetch("/api/enrich",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(paper),signal:controller.signal});
+        if(!response.ok)throw new Error("AI 内容暂不可用");
+        let enriched=await response.json();
+        const jobId=enriched.job_id;
+        while(enriched.status==="pending"){
+          if(!jobId)throw new Error("翻译任务缺少编号");
+          if(token!==loadToken||controller.signal.aborted)return;
+          await new Promise(resolve=>setTimeout(resolve,2500));
+          if(token!==loadToken||controller.signal.aborted)return;
+          const result=await fetch(`/api/enrich/${encodeURIComponent(jobId)}`,{signal:controller.signal});
+          if(!result.ok)throw new Error("AI 内容暂不可用");
+          enriched=await result.json();
+        }
+        if(token===loadToken)renderPaper(paper,enriched,"ready");
+      }catch{
+        if(token===loadToken)renderPaper(paper,{},"unavailable");
+      }finally{
+        clearTimeout(timer);if(token===loadToken)enrichController=null;
+      }
     }
     function startCycle(){elapsedBeforeStart=0;cycleStartedAt=performance.now();playing=true;toggleButton.textContent="暂停滚动";tick(cycleStartedAt)}
     function tick(now){if(!playing)return;const elapsed=elapsedBeforeStart+now-cycleStartedAt,ratio=Math.min(elapsed/ARTICLE_DURATION_MS,1),maxScroll=Math.max(document.documentElement.scrollHeight-innerHeight,0);window.scrollTo(0,maxScroll*ratio);progressBar.style.width=`${ratio*100}%`;const remainingMinutes=Math.max(0,Math.ceil((ARTICLE_DURATION_MS-elapsed)/60000));statusElement.textContent=`第 ${paperIndex+1} / ${papers.length} 篇 · 约 ${remainingMinutes} 分钟后切换`;if(ratio>=1)showPaper(paperIndex+1);else animationId=requestAnimationFrame(tick)}
