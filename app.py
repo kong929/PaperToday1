@@ -171,6 +171,11 @@ AI_MODEL = (
     or "deepseek-flash"
 ).strip()
 
+AI_ENRICH_MODEL = (
+    os.environ.get("AI_ENRICH_MODEL")
+    or ("Kimi-K3" if "llmapi.paratera.com" in AI_API_URL else AI_MODEL)
+).strip()
+
 AI_JSON_MODE = os.environ.get("AI_JSON_MODE", "1").strip() == "1"
 AI_MAX_TOKENS_PARAM = os.environ.get(
     "AI_MAX_TOKENS_PARAM", "max_tokens"
@@ -892,10 +897,10 @@ def ai_request_headers():
     }
 
 
-def ai_request_payload(messages, max_tokens):
+def ai_request_payload(messages, max_tokens, model=None):
     """构造请求体，并按配置决定是否使用 JSON 模式和 max_tokens 参数名。"""
     payload = {
-        "model": AI_MODEL,
+        "model": model or AI_MODEL,
         "messages": messages,
         "stream": False
     }
@@ -945,7 +950,8 @@ summary_zh：直接面向读者写 3 至 5 段中文导读，依次说明研究�
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}
         ],
-        2200
+        2200,
+        model=AI_ENRICH_MODEL
     )
     translation = _call_ai(translation_payload)
     required = ("title_zh", "abstract_zh")
@@ -972,7 +978,8 @@ summary_zh：直接面向读者写 3 至 5 段中文导读，依次说明研究�
             {"role": "system", "content": summary_system_prompt},
             {"role": "user", "content": json.dumps(summary_prompt, ensure_ascii=False)}
         ],
-        1800
+        1800,
+        model=AI_ENRICH_MODEL
     )
     summary = _call_ai(summary_payload)
     if not isinstance(summary.get("summary_zh"), str) or not summary["summary_zh"].strip():
@@ -1310,7 +1317,8 @@ def health_check():
         "service": "PaperToday",
         "translation_configured": bool(AI_API_KEY),
         "ai_api_url": AI_API_URL,
-        "ai_model": AI_MODEL
+        "ai_model": AI_MODEL,
+        "ai_enrich_model": AI_ENRICH_MODEL
     })
 
 

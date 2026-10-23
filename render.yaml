@@ -13,6 +13,8 @@ services:
         value: https://llmapi.paratera.com/v1/chat/completions
       - key: AI_MODEL
         value: Qwen3.8-Max
+      - key: AI_ENRICH_MODEL
+        value: Kimi-K3
       - key: AI_API_KEY
         sync: false
       # Paratera 自定义 TLS 链在部分环境会触发 SSL EOF；设为 0 关闭校验。

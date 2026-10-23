@@ -73,6 +73,24 @@ class PaperRoutesTest(unittest.TestCase):
             self.assertNotEqual(first.json["job_id"], second.json["job_id"])
             self.assertEqual(submit.call_count, 2)
 
+    def test_single_paper_uses_enrichment_model_for_both_calls(self):
+        outputs = [
+            {"title_zh": "Title", "abstract_zh": "Abstract"},
+            {"summary_zh": "Summary"},
+        ]
+        with patch.object(paper_app, "AI_API_KEY", "test-key"), patch.object(
+            paper_app, "AI_ENRICH_MODEL", "Kimi-K3"
+        ), patch.object(
+            paper_app, "_call_ai", side_effect=outputs
+        ) as call:
+            result = paper_app.call_deepseek_enrich({
+                "title": "English title",
+                "abstract": "English abstract",
+            })
+        self.assertEqual(result["summary_zh"], "Summary")
+        self.assertEqual([item.args[0]["model"] for item in call.call_args_list],
+                         ["Kimi-K3", "Kimi-K3"])
+
 
 if __name__ == "__main__":
     unittest.main()

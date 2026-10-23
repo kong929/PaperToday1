@@ -8,7 +8,7 @@
 - 过滤新闻、短讯、评论、社论、勘误和撤稿，只保留正式研究论文。
 - 通过 PubMed 文献类型和摘要长度校验论文质量。
 - 使用 OpenAlex 为缺少摘要的记录回填公开摘要。
-- 使用 DeepSeek 生成中文标题、摘要翻译和研究导读。
+- 使用可配置的 AI 接口生成中文标题、摘要翻译和研究导读。
 - 单篇论文逐篇展示，支持暂停滚动和手动切换。
 
 ## 本地运行
@@ -38,6 +38,7 @@ python app.py
 - `AI_API_KEY`：OpenAI 兼容接口的 API Key。
 - `AI_API_URL`：完整的 Chat Completions 地址。
 - `AI_MODEL`：模型名称。
+- `AI_ENRICH_MODEL`：单篇论文翻译与总结使用的模型；Paratera 默认 `Kimi-K3`，其他接口默认与 `AI_MODEL` 相同。
 - `APP_USERNAME`、`APP_PASSWORD`：可选访问密码，两者都设置后启用 Basic Auth。
 - `AI_JSON_MODE`：是否发送 `response_format`，默认 `1`；接口不支持时设为 `0`。
 - `AI_MAX_TOKENS_PARAM`：Token 上限参数名，默认 `max_tokens`。
@@ -50,13 +51,13 @@ python app.py
 
 1. 把项目推送到 GitHub，确保仓库根目录直接包含 `app.py`、`requirements.txt`、`render.yaml` 和 `templates/`。
 2. 在 Render 中选择 **New > Blueprint**，连接该 GitHub 仓库。
-3. 按提示填写 `DEEPSEEK_API_KEY`，创建服务。
+3. 在 Render 环境变量中填写 `AI_API_KEY`，创建服务；不要把 Key 提交到仓库。
 4. 部署完成后访问 Render 提供的 `https://...onrender.com` 地址。
 
 如果手动创建 Web Service：
 
 - Build Command：`pip install -r requirements.txt`
-- Start Command：`gunicorn app:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1`
+- Start Command：`gunicorn app:app --bind 0.0.0.0:$PORT --worker-class gthread --threads 4 --timeout 120 --workers 1`
 - Health Check Path：`/health`
 
 Render 免费实例空闲后会休眠，首次访问需要等待冷启动；论文数据首次抓取也可能需要几十秒。
@@ -66,7 +67,6 @@ Render 免费实例空闲后会休眠，首次访问需要等待冷启动；论�
 - [Crossref](https://www.crossref.org/)
 - [OpenAlex](https://openalex.org/)
 - [PubMed](https://pubmed.ncbi.nlm.nih.gov/)
-- [DeepSeek](https://www.deepseek.com/)
 
 ## 项目结构
 
