@@ -873,7 +873,7 @@ def _call_ai(payload):
         AI_API_URL,
         headers=ai_request_headers(),
         json=payload,
-        timeout=45,
+        timeout=85,
         verify=AI_SSL_VERIFY
     )
     response.raise_for_status()
@@ -945,50 +945,24 @@ summary_zh：直接面向读者写 3 至 5 段中文导读，依次说明研究�
 导读中不要复述任务、不要提到“用户提供的摘要”，也不要写大段“信息有限”之类的自我说明；确实缺少某方面信息时，用一句话自然带过。
 不得编造用户没有提供的实验数据、结论或研究方法。
 """
-    translation_payload = ai_request_payload(
+    payload = ai_request_payload(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}
         ],
-        2200,
+        3600,
         model=AI_ENRICH_MODEL
     )
-    translation = _call_ai(translation_payload)
-    required = ("title_zh", "abstract_zh")
-    if any(not isinstance(translation.get(key), str)
-           or not translation[key].strip()
+    enriched = _call_ai(payload)
+    required = ("title_zh", "abstract_zh", "summary_zh")
+    if any(not isinstance(enriched.get(key), str)
+           or not enriched[key].strip()
            for key in required):
-        raise ValueError("AI 翻译字段不完整")
-
-    summary_prompt = {
-        "title": paper.get("title", ""),
-        "abstract": source_abstract,
-        "journal": paper.get("journal", ""),
-        "authors": paper.get("authors", ""),
-        "title_zh": translation.get("title_zh", ""),
-        "abstract_zh": translation.get("abstract_zh", "")
-    }
-    summary_system_prompt = """
-你是一名严谨的科研编辑，覆盖生物医学与人工智能方向。
-根据提供的论文元数据与中文翻译，用通俗但准确的中文写 3 至 5 段导读，说明研究问题、方法、主要发现与意义。
-直接输出 JSON 对象，只包含一个字符串字段 summary_zh。不要复述标题，不要提及任务或“用户提供的信息”。
-"""
-    summary_payload = ai_request_payload(
-        [
-            {"role": "system", "content": summary_system_prompt},
-            {"role": "user", "content": json.dumps(summary_prompt, ensure_ascii=False)}
-        ],
-        1800,
-        model=AI_ENRICH_MODEL
-    )
-    summary = _call_ai(summary_payload)
-    if not isinstance(summary.get("summary_zh"), str) or not summary["summary_zh"].strip():
-        raise ValueError("AI 导读字段不完整")
+        raise ValueError("AI 翻译与总结字段不完整")
 
     return {
-        "title_zh": clean_ai_text(translation["title_zh"]),
-        "abstract_zh": clean_ai_text(translation["abstract_zh"]),
-        "summary_zh": clean_ai_text(summary["summary_zh"])
+        key: clean_ai_text(enriched[key])
+        for key in required
     }
 
 
