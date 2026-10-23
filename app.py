@@ -143,21 +143,44 @@ cache_lock = Lock()
 
 
 # ==========================================
-# 4. DeepSeek API 配置
+# 4. AI API 配置
 # ==========================================
+#
+# 默认使用 DeepSeek，同时支持任意 OpenAI Chat Completions 兼容接口。
+# AI_* 优先，DEEPSEEK_* 作为旧配置兼容。
 
-DEEPSEEK_API_KEY = os.environ.get(
-    "DEEPSEEK_API_KEY", ""
-)
+AI_API_KEY = (
+    os.environ.get("AI_API_KEY")
+    or os.environ.get("DEEPSEEK_API_KEY", "")
+).strip()
 
-DEEPSEEK_API_URL = (
-    "https://api.deepseek.com/chat/completions"
-)
+AI_API_URL = (
+    os.environ.get("AI_API_URL")
+    or os.environ.get("DEEPSEEK_API_URL")
+    or "https://api.deepseek.com/chat/completions"
+).strip()
 
-DEEPSEEK_MODEL = os.environ.get(
-    "DEEPSEEK_MODEL",
-    "deepseek-flash"
-)
+AI_MODEL = (
+    os.environ.get("AI_MODEL")
+    or os.environ.get("DEEPSEEK_MODEL")
+    or "deepseek-flash"
+).strip()
+
+AI_JSON_MODE = os.environ.get("AI_JSON_MODE", "1").strip() == "1"
+AI_MAX_TOKENS_PARAM = os.environ.get(
+    "AI_MAX_TOKENS_PARAM", "max_tokens"
+).strip()
+AI_API_KEY_HEADER = os.environ.get(
+    "AI_API_KEY_HEADER", "Authorization"
+).strip()
+AI_API_KEY_PREFIX = os.environ.get(
+    "AI_API_KEY_PREFIX", "Bearer"
+).strip()
+AI_SSL_VERIFY = os.environ.get("AI_SSL_VERIFY", "1").strip() != "0"
+
+DEEPSEEK_API_KEY = AI_API_KEY
+DEEPSEEK_API_URL = AI_API_URL
+DEEPSEEK_MODEL = AI_MODEL
 
 APP_USERNAME = os.environ.get("APP_USERNAME", "")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
@@ -841,10 +864,50 @@ def clean_ai_text(value):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+def ai_request_headers():
+    """构造 OpenAI 兼容接口的鉴权头，支持自定义头名和前缀。"""
+    header_name = AI_API_KEY_HEADER or "Authorization"
+    prefix = AI_API_KEY_PREFIX.strip()
+    if prefix.lower() in {"none", "null", "-"}:
+        prefix = ""
+    header_value = f"{prefix} {AI_API_KEY}".strip() if prefix else AI_API_KEY
+    return {
+        header_name: header_value,
+        "Content-Type": "application/json"
+    }
+
+
+def ai_request_payload(messages, max_tokens):
+    """构造请求体，并按配置决定是否使用 JSON 模式和 max_tokens 参数名。"""
+    payload = {
+        "model": AI_MODEL,
+        "messages": messages,
+        "stream": False
+    }
+    token_key = AI_MAX_TOKENS_PARAM or "max_tokens"
+    payload[token_key] = max_tokens
+    if AI_JSON_MODE:
+        payload["response_format"] = {"type": "json_object"}
+    return payload
+
+
+def parse_ai_json(value):
+    """解析模型返回的 JSON，兼容 Markdown 代码块和前后附加文本。"""
+    text = (value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end + 1]
+    return json.loads(text)
+
+
 def call_deepseek_enrich(paper):
     """翻译当前论文，并根据可用元数据生成简洁中文总结。"""
-    if not DEEPSEEK_API_KEY:
-        raise RuntimeError("DeepSeek API Key 未配置")
+    if not AI_API_KEY:
+        raise RuntimeError("AI API Key 未配置")
 
     source_abstract = paper.get("abstract", "").strip()
     prompt = {
@@ -862,35 +925,30 @@ summary_zh：直接面向读者写 3 至 5 段中文导读，依次说明研究�
 导读中不要复述任务、不要提到“用户提供的摘要”，也不要写大段“信息有限”之类的自我说明；确实缺少某方面信息时，用一句话自然带过。
 不得编造用户没有提供的实验数据、结论或研究方法。
 """
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
+    payload = ai_request_payload(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}
         ],
-        "response_format": {"type": "json_object"},
-        "stream": False,
-        "max_tokens": 3500
-    }
+        3500
+    )
     response = requests.post(
-        DEEPSEEK_API_URL,
-        headers={
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        },
+        AI_API_URL,
+        headers=ai_request_headers(),
         json=payload,
-        timeout=90
+        timeout=90,
+        verify=AI_SSL_VERIFY
     )
     response.raise_for_status()
     result = response.json()
     choices = result.get("choices") or []
     if not choices:
-        raise ValueError("DeepSeek 返回内容为空")
-    parsed = json.loads(choices[0]["message"]["content"])
+        raise ValueError("AI 返回内容为空")
+    parsed = parse_ai_json(choices[0]["message"]["content"])
     required = ("title_zh", "abstract_zh", "summary_zh")
     if any(not isinstance(parsed.get(key), str) or not parsed[key].strip()
            for key in required):
-        raise ValueError("DeepSeek 返回字段不完整")
+        raise ValueError("AI 返回字段不完整")
     return {key: clean_ai_text(parsed[key]) for key in required}
 
 
@@ -918,8 +976,8 @@ def enrich_paper():
         cached = ENRICHMENT_CACHE.get(cache_key)
     if cached:
         return jsonify(cached)
-    if not DEEPSEEK_API_KEY:
-        return jsonify({"error": "DeepSeek API 尚未配置"}), 503
+    if not AI_API_KEY:
+        return jsonify({"error": "AI API 尚未配置"}), 503
 
     try:
         enriched = call_deepseek_enrich(paper)
@@ -934,12 +992,12 @@ def enrich_paper():
 
 
 # ==========================================
-# 9. DeepSeek 学术翻译
+# 9. AI 学术翻译
 # ==========================================
 
 def call_deepseek_translate(titles):
     """
-    调用 DeepSeek 翻译英文论文标题
+    调用 AI 翻译英文论文标题
 
     参数：
         titles: 英文标题列表
@@ -948,9 +1006,9 @@ def call_deepseek_translate(titles):
         中文标题列表
     """
 
-    if not DEEPSEEK_API_KEY:
+    if not AI_API_KEY:
         raise RuntimeError(
-            "DeepSeek API Key 未配置"
+            "AI API Key 未配置"
         )
 
     system_prompt = """
@@ -984,37 +1042,20 @@ JSON 输出格式示例：
         ensure_ascii=False
     )
 
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
+    payload = ai_request_payload(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ],
-        "response_format": {
-            "type": "json_object"
-        },
-        "stream": False,
-        "max_tokens": 3000
-    }
-
-    headers = {
-        "Authorization": (
-            f"Bearer {DEEPSEEK_API_KEY}"
-        ),
-        "Content-Type": "application/json"
-    }
+        3000
+    )
 
     response = requests.post(
-        DEEPSEEK_API_URL,
-        headers=headers,
+        AI_API_URL,
+        headers=ai_request_headers(),
         json=payload,
-        timeout=60
+        timeout=60,
+        verify=AI_SSL_VERIFY
     )
 
     response.raise_for_status()
@@ -1025,24 +1066,24 @@ JSON 输出格式示例：
 
     if not choices:
         raise ValueError(
-            "DeepSeek 返回内容为空"
+            "AI 返回内容为空"
         )
 
     choice = choices[0]
 
     if choice.get("finish_reason") != "stop":
         raise ValueError(
-            "DeepSeek 未正常完成翻译"
+            "AI 未正常完成翻译"
         )
 
     content = choice["message"]["content"]
 
     if not content:
         raise ValueError(
-            "DeepSeek 翻译结果为空"
+            "AI 翻译结果为空"
         )
 
-    parsed = json.loads(content)
+    parsed = parse_ai_json(content)
 
     translated = parsed.get("translations")
 
@@ -1114,9 +1155,9 @@ def translate_papers():
             "translations": []
         })
 
-    if not DEEPSEEK_API_KEY:
+    if not AI_API_KEY:
         return jsonify({
-            "error": "DeepSeek API 尚未配置"
+            "error": "AI API 尚未配置"
         }), 503
 
     # 收集未翻译的标题
@@ -1160,7 +1201,7 @@ def translate_papers():
         ) as error:
 
             app.logger.warning(
-                "DeepSeek 翻译失败: %s",
+                "AI 翻译失败: %s",
                 error
             )
 
@@ -1193,9 +1234,9 @@ def health_check():
     return jsonify({
         "status": "ok",
         "service": "PaperToday",
-        "translation_configured": bool(
-            DEEPSEEK_API_KEY
-        )
+        "translation_configured": bool(AI_API_KEY),
+        "ai_api_url": AI_API_URL,
+        "ai_model": AI_MODEL
     })
 
 

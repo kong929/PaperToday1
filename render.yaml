@@ -9,7 +9,15 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
-      - key: DEEPSEEK_API_KEY
+      - key: AI_API_URL
+        value: https://llmapi.paratera.com/v1/chat/completions
+      - key: AI_MODEL
+        value: Qwen3.8-Max
+      - key: AI_API_KEY
         sync: false
-      - key: DEEPSEEK_MODEL
-        value: deepseek-flash
+      # Paratera 自定义 TLS 链在部分环境会触发 SSL EOF；设为 0 关闭校验。
+      - key: AI_SSL_VERIFY
+        value: "0"
+      # 接口不支持 response_format 时改为 0。
+      - key: AI_JSON_MODE
+        value: "1"

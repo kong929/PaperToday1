@@ -17,10 +17,10 @@
 pip install -r requirements.txt
 ```
 
-设置 DeepSeek API Key：
+设置 AI API Key：
 
 ```powershell
-$env:DEEPSEEK_API_KEY="your-api-key"
+$env:AI_API_KEY="your-api-key"
 ```
 
 启动服务：
@@ -35,9 +35,14 @@ python app.py
 
 ## 配置
 
-- `DEEPSEEK_API_KEY`：DeepSeek API 密钥。
-- `DEEPSEEK_MODEL`：模型名称，默认 `deepseek-flash`。
+- `AI_API_KEY`：OpenAI 兼容接口的 API Key。
+- `AI_API_URL`：完整的 Chat Completions 地址。
+- `AI_MODEL`：模型名称。
 - `APP_USERNAME`、`APP_PASSWORD`：可选访问密码，两者都设置后启用 Basic Auth。
+- `AI_JSON_MODE`：是否发送 `response_format`，默认 `1`；接口不支持时设为 `0`。
+- `AI_MAX_TOKENS_PARAM`：Token 上限参数名，默认 `max_tokens`。
+
+旧的 `DEEPSEEK_API_KEY`、`DEEPSEEK_API_URL`、`DEEPSEEK_MODEL` 仍然兼容。
 
 ## 公网部署
 
