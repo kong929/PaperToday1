@@ -864,6 +864,23 @@ def clean_ai_text(value):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+def _call_ai(payload):
+    """发送 OpenAI 兼容请求，解析 JSON 并返回字段。"""
+    response = requests.post(
+        AI_API_URL,
+        headers=ai_request_headers(),
+        json=payload,
+        timeout=45,
+        verify=AI_SSL_VERIFY
+    )
+    response.raise_for_status()
+    result = response.json()
+    choices = result.get("choices") or []
+    if not choices:
+        raise ValueError("AI 返回内容为空")
+    return parse_ai_json(choices[0]["message"]["content"])
+
+
 def ai_request_headers():
     """构造 OpenAI 兼容接口的鉴权头，支持自定义头名和前缀。"""
     header_name = AI_API_KEY_HEADER or "Authorization"
@@ -925,33 +942,49 @@ summary_zh：直接面向读者写 3 至 5 段中文导读，依次说明研究�
 导读中不要复述任务、不要提到“用户提供的摘要”，也不要写大段“信息有限”之类的自我说明；确实缺少某方面信息时，用一句话自然带过。
 不得编造用户没有提供的实验数据、结论或研究方法。
 """
-    payload = ai_request_payload(
+    translation_payload = ai_request_payload(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}
         ],
-        3500
+        2200
     )
-    response = requests.post(
-        AI_API_URL,
-        headers=ai_request_headers(),
-        json=payload,
-        timeout=90,
-        verify=AI_SSL_VERIFY
-    )
-    response.raise_for_status()
-    result = response.json()
-    choices = result.get("choices") or []
-    if not choices:
-        raise ValueError("AI 返回内容为空")
-    parsed = parse_ai_json(choices[0]["message"]["content"])
-    required = ("title_zh", "abstract_zh", "summary_zh")
-    if any(not isinstance(parsed.get(key), str) or not parsed[key].strip()
+    translation = _call_ai(translation_payload)
+    required = ("title_zh", "abstract_zh")
+    if any(not isinstance(translation.get(key), str)
+           or not translation[key].strip()
            for key in required):
-        raise ValueError("AI 返回字段不完整")
-    return {key: clean_ai_text(parsed[key]) for key in required}
+        raise ValueError("AI 翻译字段不完整")
 
+    summary_prompt = {
+        "title": paper.get("title", ""),
+        "abstract": source_abstract,
+        "journal": paper.get("journal", ""),
+        "authors": paper.get("authors", ""),
+        "title_zh": translation.get("title_zh", ""),
+        "abstract_zh": translation.get("abstract_zh", "")
+    }
+    summary_system_prompt = """
+你是一名严谨的科研编辑，覆盖生物医学与人工智能方向。
+根据提供的论文元数据与中文翻译，用通俗但准确的中文写 3 至 5 段导读，说明研究问题、方法、主要发现与意义。
+直接输出 JSON 对象，只包含一个字符串字段 summary_zh。不要复述标题，不要提及任务或“用户提供的信息”。
+"""
+    summary_payload = ai_request_payload(
+        [
+            {"role": "system", "content": summary_system_prompt},
+            {"role": "user", "content": json.dumps(summary_prompt, ensure_ascii=False)}
+        ],
+        1800
+    )
+    summary = _call_ai(summary_payload)
+    if not isinstance(summary.get("summary_zh"), str) or not summary["summary_zh"].strip():
+        raise ValueError("AI 导读字段不完整")
 
+    return {
+        "title_zh": clean_ai_text(translation["title_zh"]),
+        "abstract_zh": clean_ai_text(translation["abstract_zh"]),
+        "summary_zh": clean_ai_text(summary["summary_zh"])
+    }
 @app.route("/api/enrich", methods=["POST"])
 def enrich_paper():
     """处理当前展示的单篇论文，避免一次翻译整批论文。"""
